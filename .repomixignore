@@ -1,0 +1,20 @@
+# Add patterns to ignore here, one per line
+# Example:
+# *.log
+# tmp/
+
+__pycache__/
+.venv/
+.ruff_cache/
+.pytest_cache/
+LICENSE
+indycar-sectiontimes-race.pdf
+uv.lock
+
+repomix-output.xml
+coverage.lcov
+.gitignore
+repomix.config.json
+.pytest.ini
+.coveragerc
+.repomixignore
