@@ -209,6 +209,33 @@ def test_parse_section_times_ends_on_next_car_section(mock_pdf_open):
     assert "11.111" not in df.values
 
 
+@patch("pdfplumber.open")
+def test_parse_section_times_breaks_on_unrelated_car_section_header(mock_pdf_open):
+    """
+    Test that the parser breaks out of the page loop when it encounters a car section header
+    for a different car and is not currently in a car section.
+    This covers the 'elif self.is_end_of_current_car_section(text):' branch.
+    """
+    mock_pdf = MagicMock()
+    mock_page1 = MagicMock()
+    mock_page2 = MagicMock()
+    # First page: not the car we're looking for, but contains a car section header
+    mock_page1.extract_text.return_value = (
+        "Section Data for Car 99\nLap   T/S   S1   S2\n1   T   99.999   88.888\n"
+    )
+    # Second page: would have the correct car, but should not be reached
+    mock_page2.extract_text.return_value = (
+        "Section Data for Car 5\nLap   T/S   S1   S2\n1   T   12.345   23.456\n"
+    )
+    mock_pdf.pages = [mock_page1, mock_page2]
+    mock_pdf_open.return_value.__enter__.return_value = mock_pdf
+
+    parser = SectionTimesParser("dummy.pdf", 5)
+    df = parser.parse_section_times()
+    # Should be empty because the parser breaks on the first page
+    assert df.empty
+
+
 def test_laps_getter():
     parser = SectionTimesParser("dummy.pdf", 5)
     parser.laps = [{"Lap_time": "1", "T/S_time": "T", "S1_time": "12.345"}]
