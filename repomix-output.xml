@@ -54,6 +54,226 @@ README.md
 <files>
 This section contains the contents of the repository's files.
 
+<file path="src/indycar_data_parsing/__init__.py">
+from indycar_data_parsing.section_times_parser import SectionTimesParser
+
+FILE = "indycar-sectiontimes-race.pdf"
+CAR_NUMBER = 2
+
+if __name__ == "__main__":
+    parser = SectionTimesParser(pdf_path=FILE, car_number=CAR_NUMBER)
+    section_times_df = parser.parse_section_times()
+    print(section_times_df.head())
+</file>
+
+<file path="src/indycar_data_parsing/section_times_parser.py">
+import pdfplumber
+import re
+import pandas as pd
+
+
+class SectionTimesParser:
+    """Parser for extracting section times from IndyCar section results PDFs."""
+
+    def __init__(self, pdf_path: str, car_number: int):
+        self._pdf_path = pdf_path
+        self._car_number = car_number
+        self._laps = []
+        self._header = None
+        self.is_in_car_section = False
+
+    @property
+    def pdf_path(self) -> str:
+        """Returns the path to the PDF file."""
+        return self._pdf_path
+
+    @property
+    def car_number(self) -> int:
+        """Returns the car number for which section times are being parsed."""
+        return self._car_number
+
+    @property
+    def laps(self) -> list[dict[str, str]]:
+        """Returns the parsed lap and section times."""
+        return self._laps
+
+    @laps.setter
+    def laps(self, value: list[dict[str, str]]) -> None:
+        """Sets the parsed lap and section times."""
+        self._laps = value
+
+    @property
+    def header(self) -> str:
+        """Returns the header line of the section times."""
+        return self._header
+
+    @header.setter
+    def header(self, value: str) -> None:
+        """Sets the header line of the section times."""
+        self._header = value
+
+    @staticmethod
+    def _is_header_line(line: str) -> bool:
+        """Checks if a line is a header line based on its content."""
+        return bool(re.match(r"Lap\s+T/S", line.strip()))
+
+    @staticmethod
+    def parse_column_names_from_header(header: str) -> list[str]:
+        """Extracts column names from a header line."""
+        return re.split(r"\s{1,}", header.strip())
+
+    def get_car_section_header(self) -> str:
+        """Generates the section header for the specified car number."""
+        return f"Section Data for Car {self.car_number}"
+
+    def is_end_of_current_car_section(self, text: str) -> bool:
+        """Checks if the end of the current car section is reached."""
+        return "Section Data for Car" in text and not self.is_in_car_section
+
+    def create_lap_dict(
+        self, col_names: list[str], lap_data: list[str]
+    ) -> dict[str, str]:
+        """Creates a dictionary for a lap entry with the specified column and value.
+
+        Args:
+            col_names (list[str]): The list of column names for the lap entry.
+            lap_data (list[str]): The list of values for the lap entry.
+
+        Returns:
+            dict: A dictionary representing the lap entry.
+        """
+        return {f"{col}_time": val for col, val in zip(col_names, lap_data)}
+
+    def update_lap_dict_with_speed_data(
+        self, lap_dict: dict[str, str], speed_data: list[str]
+    ) -> dict[str, str]:
+        """Updates the lap dictionary with speed data.
+
+        Args:
+            lap_dict (dict[str, str]): The lap dictionary to update.
+            speed_data (list[str]): The list of speed values to add to the lap dictionary.
+
+        Returns:
+            dict[str, str]: The updated lap dictionary with speed data.
+        """
+        for col, val in zip(list(lap_dict.keys()), speed_data):
+            if col == "Lap":
+                lap_dict[f"{col}_speed"] = None
+            else:
+                lap_dict[f"{col}_speed"] = val if val != "" else None
+        return lap_dict
+
+    def _parse_lines_for_laps(self, lines, col_names):
+        """Parse lines for lap and speed data, returning a list of lap dicts."""
+        laps = []
+        for i, line in enumerate(lines):
+            # Stop if a new car section header is found in the middle of the page
+            if (
+                "Section Data for Car" in line
+                and line.strip() != self.get_car_section_header()
+            ):
+                self.is_in_car_section = False
+                break
+
+            if self._is_header_line(line):
+                col_names = self.parse_column_names_from_header(line)
+                continue
+
+            elif re.match(r"^\d+\s+T\s", line):
+                lap_data = re.split(r"\s{1,}", line.strip())
+                if i + 1 < len(lines) and lines[i + 1].strip().startswith("S "):
+                    speed_data = re.split(r"\s{1,}", lines[i + 1].strip())
+                else:
+                    speed_data = []
+
+                lap_dict = self.create_lap_dict(col_names, lap_data)
+                lap_dict = self.update_lap_dict_with_speed_data(lap_dict, speed_data)
+                laps.append(lap_dict)
+        return laps
+
+    @staticmethod
+    def text_contains_car_section_header(text: str, car_section_header: str) -> bool:
+        """Return True if any line in text matches the car section header exactly (no stripping)."""
+        return any(line == car_section_header for line in text.splitlines())
+
+    def _extract_car_section_texts(self, pdf):
+        """Yield text blocks for the relevant car section from the PDF."""
+        self.is_in_car_section = False  # Reset state for each call
+        car_section_header = self.get_car_section_header()
+        for page in pdf.pages:
+            text = page.extract_text()
+            if not text:
+                continue
+            if self.text_contains_car_section_header(text, car_section_header):
+                yield text
+            elif self.is_end_of_current_car_section(text):
+                break
+
+    def parse_section_times(self) -> pd.DataFrame:
+        """Extracts lap and section times for a given car number from an IndyCar section results PDF.
+
+        Returns:
+            pd.DataFrame: A DataFrame containing the lap and section times for the specified car number.
+        """
+        laps = []
+
+        with pdfplumber.open(self.pdf_path) as pdf:
+            col_names = []
+            for text in self._extract_car_section_texts(pdf):
+                self.is_in_car_section = True
+                lines = text.split("\n")
+                laps.extend(self._parse_lines_for_laps(lines, col_names))
+                # If _parse_lines_for_laps sets is_in_car_section to False, stop
+                if not self.is_in_car_section:
+                    break
+
+        df = pd.DataFrame(laps)
+        if "Lap_time" in df.columns:
+            df["Lap"] = df["Lap_time"]
+            df = df.drop(columns=["Lap_time"], errors="ignore")
+        return df
+</file>
+
+<file path=".python-version">
+3.12
+</file>
+
+<file path="pyproject.toml">
+[project]
+name = "indycar-data-parsing"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Andy Weaver", email = "andrewayersweaver@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "duckdb>=1.3.0",
+    "pandas>=2.2.3",
+    "pdfplumber>=0.11.6",
+    "polars>=1.30.0",
+    "pyarrow>=20.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+    "pytest-cov>=6.1.1",
+    "ruff>=0.11.11",
+    "ty>=0.0.1a7",
+]
+</file>
+
+<file path="README.md">
+# indycar-data-parsing
+Get detailed IndyCar data, extract from pdf, structure, model
+</file>
+
 <file path="src/indycar_data_parsing/tests/test_section_time_parser.py">
 import pandas as pd
 from unittest.mock import patch, MagicMock
@@ -107,6 +327,23 @@ def test_is_header_line_true():
 
 def test_is_header_line_false():
     assert not SectionTimesParser._is_header_line("1   T   12.345   23.456")
+
+
+def test_text_contains_car_section_header():
+    car_section_header = "Section Data for Car 5"
+    text1 = "Section Data for Car 5\nLap   T/S   S1   S2\n1   T   12.345   23.456"
+    text2 = "Section Data for Car 4\nLap   T/S   S1   S2\n1   T   10.000   20.000"
+    text3 = "  Section Data for Car 5  \nLap   T/S   S1   S2\n1   T   12.345   23.456"
+    assert SectionTimesParser.text_contains_car_section_header(
+        text1, car_section_header
+    )
+    assert not SectionTimesParser.text_contains_car_section_header(
+        text2, car_section_header
+    )
+    # Should not match if there is extra whitespace
+    assert not SectionTimesParser.text_contains_car_section_header(
+        text3, car_section_header
+    )
 
 
 @patch("pdfplumber.open")
@@ -266,6 +503,33 @@ def test_parse_section_times_ends_on_next_car_section(mock_pdf_open):
     assert "11.111" not in df.values
 
 
+@patch("pdfplumber.open")
+def test_parse_section_times_breaks_on_unrelated_car_section_header(mock_pdf_open):
+    """
+    Test that the parser breaks out of the page loop when it encounters a car section header
+    for a different car and is not currently in a car section.
+    This covers the 'elif self.is_end_of_current_car_section(text):' branch.
+    """
+    mock_pdf = MagicMock()
+    mock_page1 = MagicMock()
+    mock_page2 = MagicMock()
+    # First page: not the car we're looking for, but contains a car section header
+    mock_page1.extract_text.return_value = (
+        "Section Data for Car 99\nLap   T/S   S1   S2\n1   T   99.999   88.888\n"
+    )
+    # Second page: would have the correct car, but should not be reached
+    mock_page2.extract_text.return_value = (
+        "Section Data for Car 5\nLap   T/S   S1   S2\n1   T   12.345   23.456\n"
+    )
+    mock_pdf.pages = [mock_page1, mock_page2]
+    mock_pdf_open.return_value.__enter__.return_value = mock_pdf
+
+    parser = SectionTimesParser("dummy.pdf", 5)
+    df = parser.parse_section_times()
+    # Should be empty because the parser breaks on the first page
+    assert df.empty
+
+
 def test_laps_getter():
     parser = SectionTimesParser("dummy.pdf", 5)
     parser.laps = [{"Lap_time": "1", "T/S_time": "T", "S1_time": "12.345"}]
@@ -323,207 +587,69 @@ def test_parse_section_times_lap_time_column_renaming():
     assert "Lap" in df.columns
     assert "Lap_time" not in df.columns
     assert list(df["Lap"]) == ["1", "2"]
-</file>
-
-<file path="src/indycar_data_parsing/__init__.py">
-from indycar_data_parsing.section_times_parser import SectionTimesParser
-
-FILE = "indycar-sectiontimes-race.pdf"
-CAR_NUMBER = 2
-
-if __name__ == "__main__":
-    parser = SectionTimesParser(pdf_path=FILE, car_number=CAR_NUMBER)
-    section_times_df = parser.parse_section_times()
-    print(section_times_df.head())
-</file>
-
-<file path="src/indycar_data_parsing/section_times_parser.py">
-import pdfplumber
-import re
-import pandas as pd
 
 
-class SectionTimesParser:
-    """Parser for extracting section times from IndyCar section results PDFs."""
+def test__parse_lines_for_laps_basic():
+    parser = SectionTimesParser("dummy.pdf", 5)
+    lines = [
+        "Lap   T/S   S1   S2",
+        "1   T   12.345   23.456",
+        "S   100.1   200.2   300.3",
+        "2   T   13.111   24.222",
+        "S   101.1   201.2   301.3",
+    ]
+    col_names = ["Lap", "T/S", "S1", "S2"]
+    laps = parser._parse_lines_for_laps(lines, col_names)
+    assert len(laps) == 2
+    assert laps[0]["Lap_time"] == "1"
+    assert laps[1]["S1_time_speed"] == "201.2"
 
-    def __init__(self, pdf_path: str, car_number: int):
-        self._pdf_path = pdf_path
-        self._car_number = car_number
-        self._laps = []
-        self._header = None
-        self.is_in_car_section = False
 
-    @property
-    def pdf_path(self) -> str:
-        """Returns the path to the PDF file."""
-        return self._pdf_path
+def test__parse_lines_for_laps_stops_on_new_car_section():
+    parser = SectionTimesParser("dummy.pdf", 5)
+    lines = [
+        "Lap   T/S   S1   S2",
+        "1   T   12.345   23.456",
+        "S   100.1   200.2   300.3",
+        "Section Data for Car 6",
+        "Lap   T/S   S1   S2",
+        "1   T   11.111   22.222",
+        "S   111.1   222.2   333.3",
+    ]
+    col_names = ["Lap", "T/S", "S1", "S2"]
+    laps = parser._parse_lines_for_laps(lines, col_names)
+    assert len(laps) == 1
+    assert laps[0]["Lap_time"] == "1"
+    assert laps[0]["S1_time"] == "12.345"
 
-    @property
-    def car_number(self) -> int:
-        """Returns the car number for which section times are being parsed."""
-        return self._car_number
 
-    @property
-    def laps(self) -> list[dict[str, str]]:
-        """Returns the parsed lap and section times."""
-        return self._laps
+def test__extract_car_section_texts_yields_only_relevant_section():
+    parser = SectionTimesParser("dummy.pdf", 5)
 
-    @laps.setter
-    def laps(self, value: list[dict[str, str]]) -> None:
-        """Sets the parsed lap and section times."""
-        self._laps = value
+    class DummyPage:
+        def __init__(self, text):
+            self._text = text
 
-    @property
-    def header(self) -> str:
-        """Returns the header line of the section times."""
-        return self._header
+        def extract_text(self):
+            return self._text
 
-    @header.setter
-    def header(self, value: str) -> None:
-        """Sets the header line of the section times."""
-        self._header = value
-
-    @staticmethod
-    def _is_header_line(line: str) -> bool:
-        """Checks if a line is a header line based on its content."""
-        return bool(re.match(r"Lap\s+T/S", line.strip()))
-
-    @staticmethod
-    def parse_column_names_from_header(header: str) -> list[str]:
-        """Extracts column names from a header line."""
-        return re.split(r"\s{1,}", header.strip())
-
-    def get_car_section_header(self) -> str:
-        """Generates the section header for the specified car number."""
-        return f"Section Data for Car {self.car_number}"
-
-    def is_end_of_current_car_section(self, text: str) -> bool:
-        """Checks if the end of the current car section is reached."""
-        return "Section Data for Car" in text and not self.is_in_car_section
-
-    def create_lap_dict(
-        self, col_names: list[str], lap_data: list[str]
-    ) -> dict[str, str]:
-        """Creates a dictionary for a lap entry with the specified column and value.
-
-        Args:
-            col_names (list[str]): The list of column names for the lap entry.
-            lap_data (list[str]): The list of values for the lap entry.
-
-        Returns:
-            dict: A dictionary representing the lap entry.
-        """
-        return {f"{col}_time": val for col, val in zip(col_names, lap_data)}
-
-    def update_lap_dict_with_speed_data(
-        self, lap_dict: dict[str, str], speed_data: list[str]
-    ) -> dict[str, str]:
-        """Updates the lap dictionary with speed data.
-
-        Args:
-            lap_dict (dict[str, str]): The lap dictionary to update.
-            speed_data (list[str]): The list of speed values to add to the lap dictionary.
-
-        Returns:
-            dict[str, str]: The updated lap dictionary with speed data.
-        """
-        for col, val in zip(list(lap_dict.keys()), speed_data):
-            if col == "Lap":
-                lap_dict[f"{col}_speed"] = None
-            else:
-                lap_dict[f"{col}_speed"] = val if val != "" else None
-        return lap_dict
-
-    def parse_section_times(self) -> pd.DataFrame:
-        """Extracts lap and section times for a given car number from an IndyCar section results PDF.
-
-        Returns:
-            pd.DataFrame: A DataFrame containing the lap and section times for the specified car number.
-        """
-        laps = []
-
-        with pdfplumber.open(self.pdf_path) as pdf:
-            car_section_header = self.get_car_section_header()
-            col_names = []
-            for page in pdf.pages:
-                text = page.extract_text()
-                if not text:
-                    continue
-
-                if car_section_header in text:
-                    self.is_in_car_section = True
-                elif self.is_end_of_current_car_section(text):
-                    self.is_in_car_section = False
-                    break
-
-                if self.is_in_car_section:
-                    lines = text.split("\n")
-                    for i, line in enumerate(lines):
-                        if self._is_header_line(line):
-                            col_names = self.parse_column_names_from_header(line)
-                            continue
-
-                        elif re.match(r"^\d+\s+T\s", line):
-                            lap_data = re.split(r"\s{1,}", line.strip())
-                            if i + 1 < len(lines) and lines[i + 1].strip().startswith(
-                                "S "
-                            ):
-                                speed_data = re.split(r"\s{1,}", lines[i + 1].strip())
-                            else:
-                                speed_data = []
-
-                            lap_dict = self.create_lap_dict(col_names, lap_data)
-                            lap_dict = self.update_lap_dict_with_speed_data(
-                                lap_dict, speed_data
-                            )
-
-                            laps.append(lap_dict)
-
-        df = pd.DataFrame(laps)
-        if "Lap_time" in df.columns:
-            df["Lap"] = df["Lap_time"]
-            df = df.drop(columns=["Lap_time"], errors="ignore")
-        return df
-</file>
-
-<file path=".python-version">
-3.12
-</file>
-
-<file path="pyproject.toml">
-[project]
-name = "indycar-data-parsing"
-version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-authors = [
-    { name = "Andy Weaver", email = "andrewayersweaver@gmail.com" }
-]
-requires-python = ">=3.12"
-dependencies = [
-    "duckdb>=1.3.0",
-    "pandas>=2.2.3",
-    "pdfplumber>=0.11.6",
-    "polars>=1.30.0",
-    "pyarrow>=20.0.0",
-]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[dependency-groups]
-dev = [
-    "pytest>=8.3.5",
-    "pytest-cov>=6.1.1",
-    "ruff>=0.11.11",
-    "ty>=0.0.1a7",
-]
-</file>
-
-<file path="README.md">
-# indycar-data-parsing
-Get detailed IndyCar data, extract from pdf, structure, model
+    pdf = MagicMock()
+    pdf.pages = [
+        DummyPage(
+            "Section Data for Car 4\nLap   T/S   S1   S2\n1   T   10.000   20.000"
+        ),
+        DummyPage(
+            "Section Data for Car 5\nLap   T/S   S1   S2\n1   T   12.345   23.456"
+        ),
+        DummyPage(
+            "Section Data for Car 6\nLap   T/S   S1   S2\n1   T   11.111   22.222"
+        ),
+    ]
+    texts = list(parser._extract_car_section_texts(pdf))
+    assert len(texts) == 1
+    assert "Section Data for Car 5" in texts[0]
+    assert "12.345" in texts[0]
+    assert "Section Data for Car 6" not in texts[0]
 </file>
 
 </files>

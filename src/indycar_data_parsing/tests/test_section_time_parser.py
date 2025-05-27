@@ -52,6 +52,55 @@ def test_is_header_line_false():
     assert not SectionTimesParser._is_header_line("1   T   12.345   23.456")
 
 
+def test_text_contains_car_section_header():
+    car_section_header = "Section Data for Car 5"
+    text1 = "Section Data for Car 5\nLap   T/S   S1   S2\n1   T   12.345   23.456"
+    text2 = "Section Data for Car 4\nLap   T/S   S1   S2\n1   T   10.000   20.000"
+    text3 = "  Section Data for Car 5  \nLap   T/S   S1   S2\n1   T   12.345   23.456"
+    assert SectionTimesParser.text_contains_car_section_header(
+        text1, car_section_header
+    )
+    assert not SectionTimesParser.text_contains_car_section_header(
+        text2, car_section_header
+    )
+    # Should not match if there is extra whitespace
+    assert not SectionTimesParser.text_contains_car_section_header(
+        text3, car_section_header
+    )
+
+
+def test_find_car_section_header_line_exact_match():
+    car_section_header = "Section Data for Car 5"
+    text = "Section Data for Car 5\nLap   T/S   S1   S2\n1   T   12.345   23.456"
+    idx = SectionTimesParser.find_car_section_header_line(text, car_section_header)
+    print(f"Lines: {text.splitlines()}")
+    assert idx == 0
+
+
+def test_find_car_section_header_line_no_match():
+    car_section_header = "Section Data for Car 5"
+    text = "Section Data for Car 4\nLap   T/S   S1   S2\n1   T   10.000   20.000"
+    idx = SectionTimesParser.find_car_section_header_line(text, car_section_header)
+    print(f"Lines: {text.splitlines()}")
+    assert idx == -1
+
+
+def test_find_car_section_header_line_whitespace():
+    car_section_header = "Section Data for Car 5"
+    text = "  Section Data for Car 5  \nLap   T/S   S1   S2\n1   T   12.345   23.456"
+    idx = SectionTimesParser.find_car_section_header_line(text, car_section_header)
+    print(f"Lines: {text.splitlines()}")
+    assert idx == -1
+
+
+def test_find_car_section_header_line_in_middle():
+    car_section_header = "Section Data for Car 5"
+    text = "Intro\nSection Data for Car 5\nLap   T/S   S1   S2"
+    idx = SectionTimesParser.find_car_section_header_line(text, car_section_header)
+    print(f"Lines: {text.splitlines()}")
+    assert idx == 1
+
+
 @patch("pdfplumber.open")
 def test_parse_section_times(mock_pdf_open):
     # Setup mock PDF structure
@@ -293,3 +342,96 @@ def test_parse_section_times_lap_time_column_renaming():
     assert "Lap" in df.columns
     assert "Lap_time" not in df.columns
     assert list(df["Lap"]) == ["1", "2"]
+
+
+def test__parse_lines_for_laps_basic():
+    parser = SectionTimesParser("dummy.pdf", 5)
+    lines = [
+        "Lap   T/S   S1   S2",
+        "1   T   12.345   23.456",
+        "S   100.1   200.2   300.3",
+        "2   T   13.111   24.222",
+        "S   101.1   201.2   301.3",
+    ]
+    col_names = ["Lap", "T/S", "S1", "S2"]
+    laps = parser._parse_lines_for_laps(lines, col_names)
+    assert len(laps) == 2
+    assert laps[0]["Lap_time"] == "1"
+    assert laps[1]["S1_time_speed"] == "201.2"
+
+
+def test__parse_lines_for_laps_stops_on_new_car_section():
+    parser = SectionTimesParser("dummy.pdf", 5)
+    lines = [
+        "Lap   T/S   S1   S2",
+        "1   T   12.345   23.456",
+        "S   100.1   200.2   300.3",
+        "Section Data for Car 6",
+        "Lap   T/S   S1   S2",
+        "1   T   11.111   22.222",
+        "S   111.1   222.2   333.3",
+    ]
+    col_names = ["Lap", "T/S", "S1", "S2"]
+    laps = parser._parse_lines_for_laps(lines, col_names)
+    assert len(laps) == 1
+    assert laps[0]["Lap_time"] == "1"
+    assert laps[0]["S1_time"] == "12.345"
+
+
+def test__extract_car_section_texts_yields_only_relevant_section():
+    parser = SectionTimesParser("dummy.pdf", 5)
+
+    class DummyPage:
+        def __init__(self, text):
+            self._text = text
+
+        def extract_text(self):
+            return self._text
+
+    pdf = MagicMock()
+    pdf.pages = [
+        DummyPage(
+            "Section Data for Car 4\nLap   T/S   S1   S2\n1   T   10.000   20.000"
+        ),
+        DummyPage(
+            "Section Data for Car 5\nLap   T/S   S1   S2\n1   T   12.345   23.456"
+        ),
+        DummyPage(
+            "Section Data for Car 6\nLap   T/S   S1   S2\n1   T   11.111   22.222"
+        ),
+    ]
+    texts = list(parser._extract_car_section_texts(pdf))
+    assert len(texts) == 1
+    assert "Section Data for Car 5" in texts[0]
+    assert "12.345" in texts[0]
+    assert "Section Data for Car 6" not in texts[0]
+
+
+def test__extract_car_section_texts_yields_only_relevant_section_verbose():
+    parser = SectionTimesParser("dummy.pdf", 5)
+
+    class DummyPage:
+        def __init__(self, text):
+            self._text = text
+
+        def extract_text(self):
+            return self._text
+
+    pdf = MagicMock()
+    pdf.pages = [
+        DummyPage(
+            "Section Data for Car 4\nLap   T/S   S1   S2\n1   T   10.000   20.000"
+        ),
+        DummyPage(
+            "Section Data for Car 5\nLap   T/S   S1   S2\n1   T   12.345   23.456"
+        ),
+        DummyPage(
+            "Section Data for Car 6\nLap   T/S   S1   S2\n1   T   11.111   22.222"
+        ),
+    ]
+    texts = list(parser._extract_car_section_texts(pdf))
+    print(f"Extracted texts: {texts}")
+    assert len(texts) == 1
+    assert "Section Data for Car 5" in texts[0]
+    assert "12.345" in texts[0]
+    assert "Section Data for Car 6" not in texts[0]
